@@ -34,6 +34,7 @@ int num_of_lockers = 0;
 static int Locker_get_filename(const char *name, char *filename, size_t maxlen);
 static void Locker_store_obj(struct char_data *ch, struct obj_data *obj, int idx);
 static void Locker_retrieve_obj(struct char_data *ch, char *name_arg, int idx);
+static void Locker_retrieve_all(struct char_data *ch, char *name_arg, int idx, int dotmode);
 static void str_tolower_inplace(char *str);
 
 
@@ -295,6 +296,90 @@ static void Locker_store_obj(struct char_data *ch, struct obj_data *obj, int idx
 }
 
 
+/* Returns 1 if the file was rewritten, 0 if nothing was retrieved.
+   Also returns 0 on error (message already sent to ch). */
+static void Locker_retrieve_all(struct char_data *ch, char *name_arg, int idx, int dotmode)
+{
+  FILE *fl;
+  char filename[MAX_STRING_LENGTH];
+  struct obj_file_elem buf[MAX_LOCKER_ITEMS];
+  int keep[MAX_LOCKER_ITEMS];      /* 1 = keep in file, 0 = remove */
+  int n_entries = 0, i, n, loc, found = 0, errors = 0;
+
+  if (!Locker_get_filename(locker_control[idx].name, filename, sizeof(filename))) {
+    send_to_char(ch, "Error accessing locker.\r\n");
+    return;
+  }
+
+  fl = fopen(filename, "rb");
+  if (!fl) {
+    send_to_char(ch, "The locker is empty.\r\n");
+    return;
+  }
+
+  while (!feof(fl) && n_entries < MAX_LOCKER_ITEMS) {
+    n = fread(&buf[n_entries], sizeof(struct obj_file_elem), 1, fl);
+    if (n < 1 || ferror(fl) || feof(fl))
+      break;
+    n_entries++;
+  }
+  fclose(fl);
+
+  if (n_entries == 0) {
+    send_to_char(ch, "The locker is empty.\r\n");
+    return;
+  }
+
+  /* Mark which entries to remove */
+  memset(keep, 1, sizeof(keep));
+
+  for (i = 0; i < n_entries; i++) {
+    struct obj_data *tmp = Obj_from_store(buf[i], &loc);
+    if (!tmp) { extract_obj(tmp); continue; }
+
+    if (dotmode == FIND_ALL || isname(name_arg, tmp->name)) {
+      if (CAN_CARRY_OBJ(ch, tmp)) {
+        obj_to_char(tmp, ch);
+        act("You retrieve $p from the locker.", FALSE, ch, tmp, NULL, TO_CHAR);
+        act("$n retrieves $p from $s locker.", FALSE, ch, tmp, NULL, TO_ROOM);
+        keep[i] = 0;
+        found++;
+      } else {
+        errors++;
+        act("You can't carry $p.", FALSE, ch, tmp, NULL, TO_CHAR);
+        extract_obj(tmp);
+      }
+    } else {
+      extract_obj(tmp);
+    }
+  }
+
+  if (found == 0) {
+    if (dotmode == FIND_ALL)
+      send_to_char(ch, "There is nothing in the locker.\r\n");
+    else
+      send_to_char(ch, "You don't see any %ss in the locker.\r\n", name_arg);
+    return;
+  }
+
+  /* Rewrite file keeping only unremoved entries */
+  if (errors == 0) {
+    if (!(fl = fopen(filename, "wb"))) {
+      perror("SYSERR: Locker_retrieve_all fopen wb");
+      send_to_char(ch, "Error rewriting locker file.\r\n");
+      return;
+    }
+    for (i = 0; i < n_entries; i++) {
+      if (keep[i])
+        fwrite(&buf[i], sizeof(struct obj_file_elem), 1, fl);
+    }
+    fclose(fl);
+  }
+
+  if (found > 1)
+    send_to_char(ch, "You retrieved %d items from the locker.\r\n", found);
+}
+
 static void Locker_retrieve_obj(struct char_data *ch, char *name_arg, int idx)
 {
   FILE *fl;
@@ -506,6 +591,9 @@ ACMD(do_locker)
   }
 
   if (is_abbrev(arg1, "put")) {
+    struct obj_data *obj_iter, *obj_next;
+    int dotmode, found = 0;
+
     argument = one_argument(argument, arg2);
     one_argument(argument, arg3);
     if (!*arg2 || !*arg3) {
@@ -523,16 +611,50 @@ ACMD(do_locker)
       send_to_char(ch, "You don't have access to that locker.\r\n");
       return;
     }
-    obj = get_obj_in_list_vis(ch, arg2, NULL, ch->carrying);
-    if (!obj) {
-      send_to_char(ch, "You don't have that item.\r\n");
-      return;
+
+    dotmode = find_all_dots(arg2);
+
+    if (dotmode == FIND_ALL) {
+      /* Put ALL items */
+      for (obj_iter = ch->carrying; obj_iter; obj_iter = obj_next) {
+        obj_next = obj_iter->next_content;
+        if (CAN_SEE_OBJ(ch, obj_iter)) {
+          found = 1;
+          Locker_store_obj(ch, obj_iter, idx);
+        }
+      }
+      if (!found)
+        send_to_char(ch, "You don't seem to be carrying anything.\r\n");
+    } else if (dotmode == FIND_ALLDOT) {
+      /* Put ALL.<pattern> items */
+      if (!*arg2) {
+        send_to_char(ch, "Put all of what in the locker?\r\n");
+        return;
+      }
+      for (obj_iter = ch->carrying; obj_iter; obj_iter = obj_next) {
+        obj_next = obj_iter->next_content;
+        if (CAN_SEE_OBJ(ch, obj_iter) && isname(arg2, obj_iter->name)) {
+          found = 1;
+          Locker_store_obj(ch, obj_iter, idx);
+        }
+      }
+      if (!found)
+        send_to_char(ch, "You don't seem to have any %ss.\r\n", arg2);
+    } else {
+      /* Put single item (with repeated lookup for multiples of the same kind) */
+      obj = get_obj_in_list_vis(ch, arg2, NULL, ch->carrying);
+      if (!obj) {
+        send_to_char(ch, "You don't have that item.\r\n");
+        return;
+      }
+      Locker_store_obj(ch, obj, idx);
     }
-    Locker_store_obj(ch, obj, idx);
     return;
   }
 
   if (is_abbrev(arg1, "get")) {
+    int dotmode;
+
     argument = one_argument(argument, arg2);
     one_argument(argument, arg3);
     if (!*arg2 || !*arg3) {
@@ -550,7 +672,18 @@ ACMD(do_locker)
       send_to_char(ch, "You don't have access to that locker.\r\n");
       return;
     }
-    Locker_retrieve_obj(ch, arg2, idx);
+
+    dotmode = find_all_dots(arg2);
+
+    if (dotmode == FIND_ALL || dotmode == FIND_ALLDOT) {
+      if (dotmode == FIND_ALLDOT && !*arg2) {
+        send_to_char(ch, "Get all of what from the locker?\r\n");
+        return;
+      }
+      Locker_retrieve_all(ch, arg2, idx, dotmode);
+    } else {
+      Locker_retrieve_obj(ch, arg2, idx);
+    }
     return;
   }
 
