@@ -189,6 +189,7 @@ int do_simple_move(struct char_data *ch, int dir, int need_specials_check)
 	  GET_HIT(ch) -= 200;
 	update_pos(ch);
 	if (GET_POS(ch) == POS_DEAD) {
+	  send_to_char(ch, "You have triggered a deadly trap!\r\n");
 	  log_death_trap(ch);
 	  death_cry(ch);
 	  extract_char(ch);
@@ -197,6 +198,7 @@ int do_simple_move(struct char_data *ch, int dir, int need_specials_check)
       return (0);
     }
     else {
+      send_to_char(ch, "You have triggered a deadly trap!\r\n");
       log_death_trap(ch);
       death_cry(ch);
       extract_char(ch);
